@@ -28,9 +28,9 @@ import glob
 from mutagen.mp3 import MP3
 
 # Robust download from a direct video URL with retry logic
-def downloadVideo(url, retries=3) -> str:
+def downloadVideo(url, save_path="tempFiles/vid.mp4", retries=3) -> str:
     """Downloads video from the given direct MP4 URL, retrying on network hiccups."""
-    save_path = "tempFiles/vid.mp4"
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, stream=True, timeout=15)
@@ -43,44 +43,63 @@ def downloadVideo(url, retries=3) -> str:
                         pbar.update(len(chunk))
             return save_path
         except (requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError) as e:
+                requests.exceptions.ConnectionError,
+                requests.exceptions.RequestException) as e:
             print(f"Download error (attempt {attempt}/{retries}): {e}")
             if attempt == retries:
-                raise
+                return None
             print("Retrying…")
-    return save_path
+    return None
 
 # Fetch Pexels search results
 def scrapeVideos(api_key: str):
     """Fetches portrait-nature video results from Pexels API."""
+    if not api_key or api_key.strip() in ("", "YOUR_PEXELS_API_KEY_HERE"):
+        print("Pexels API key is not configured.")
+        return None
     params = {'query': 'nature', 'orientation': 'portrait'}
-    headers = {'Authorization': api_key}
-    resp = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params)
-    if resp.status_code != 200:
-        print(f"Pexels API error {resp.status_code}")
+    headers = {'Authorization': api_key.strip()}
+    try:
+        resp = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=15)
+    except requests.exceptions.RequestException as e:
+        print(f"Network error connecting to Pexels: {e}")
+        return None
+    if resp.status_code == 401:
+        print("Pexels API error 401: Unauthorized. Please check that your Pexels API key is valid.")
+        return None
+    elif resp.status_code != 200:
+        print(f"Pexels API error {resp.status_code}: {resp.text}")
         return None
     data = resp.json()
-    if data.get('total_results', 0) < 1:
+    if data.get('total_results', 0) < 1 or not data.get('videos'):
         print("No videos found for your query.")
         return None
     return data
 
 # Select and download a random video file
-def getBackgroundVideo(api_key: str) -> str:
+def getBackgroundVideo(api_key: str, video_index: int = 0) -> str:
     """Selects a random Pexels video, grabs its highest-res file, and downloads it."""
     data = scrapeVideos(api_key)
-    if not data:
+    if not data or not data.get('videos'):
         return None
     video_obj = random.choice(data['videos'])
-    files = sorted(video_obj['video_files'], key=lambda v: v.get('width', 0), reverse=True)
+    mp4_files = [f for f in video_obj.get('video_files', []) if f.get('link')]
+    if not mp4_files:
+        print("No valid video files found in Pexels result.")
+        return None
+    files = sorted(mp4_files, key=lambda v: v.get('width', 0), reverse=True)
     video_url = files[0]['link']
     print("Downloading video from:", video_url)
-    return downloadVideo(video_url)
+    return downloadVideo(video_url, save_path=f"tempFiles/vid_{video_index}.mp4")
 
 # Move used quote to a separate file
 def usedQuoteToDifferentFile():
+    if not os.path.exists('quotes/motivational.txt'):
+        return
     with open('quotes/motivational.txt', 'r+', encoding='utf8') as f:
         lines = f.readlines()
+        if not lines:
+            return
         quote = lines[0]
         f.seek(0)
         f.truncate()
@@ -90,8 +109,14 @@ def usedQuoteToDifferentFile():
 
 # Read one quote from the text file
 def getQuote():
-    with open('quotes/motivational.txt', 'r+', encoding='utf8') as file:
-        line = file.readline().strip().replace("-", "\n -")
+    if not os.path.exists('quotes/motivational.txt'):
+        print("quotes/motivational.txt not found!")
+        return None
+    with open('quotes/motivational.txt', 'r', encoding='utf8') as file:
+        line = file.readline().strip()
+        if not line:
+            return None
+        line = line.replace("-", "\n -")
         print("Quote:", line)
         return line
 
@@ -112,6 +137,8 @@ def videoIntro(introText, videoNumber) -> CompositeVideoClip:
 
 # Assemble the full video
 def createVideo(quoteText: str, bgMusic: str, bgVideo: str, videoNumber: int, ttsAudio: bool):
+    if not bgVideo or not os.path.isfile(bgVideo):
+        raise FileNotFoundError(f"Background video file not found or invalid: {bgVideo}")
     introText = [
         'A quote about never giving up on your dreams',
         'A quote about being yourself',
@@ -122,6 +149,7 @@ def createVideo(quoteText: str, bgMusic: str, bgVideo: str, videoNumber: int, tt
     intro_clip = videoIntro(introText, videoNumber)
 
     # Generate TTS audio and text clip
+    os.makedirs("tempFiles", exist_ok=True)
     save_mp3 = f"tempFiles/temp_audio_{videoNumber}.mp3"
     tts = gtts.gTTS(quoteText, lang='en')
     tts.save(save_mp3)
@@ -202,19 +230,42 @@ def cleanUpAfterVideoFinished():
     deleteTempFiles()
 
 # Data verification
-def verifyData(data):
+def verifyData(data) -> bool:
     print("Checking data....")
-    if int(data['amountOfVideosToMake']) < 1:
-        print("Amount of videos < 1. Exiting...")
-        quit()
-    scrapeVideos(data['pexelsAPIKey'])
+    try:
+        amount = int(data.get('amountOfVideosToMake', 0))
+    except (ValueError, TypeError):
+        print("Error: Invalid number for 'amountOfVideosToMake'. Please check config.json.")
+        return False
+    if amount < 1:
+        print("Amount of videos to create must be at least 1.")
+        return False
+
+    api_key = data.get('pexelsAPIKey', '').strip()
+    if not api_key or api_key == "YOUR_PEXELS_API_KEY_HERE":
+        print("Error: Pexels API key is not configured! Please enter your key in config.json or choose Option 2.")
+        return False
+
+    res = scrapeVideos(api_key)
+    if not res:
+        print("Data verification failed. Could not fetch videos from Pexels.")
+        return False
+
     print("Everything went well! Starting to create videos now!")
+    return True
 
 def generateVideos(data):
-    verifyData(data)
+    if not verifyData(data):
+        return
     for i in range(int(data['amountOfVideosToMake'])):
-        bgVideo = getBackgroundVideo(data['pexelsAPIKey'])
+        bgVideo = getBackgroundVideo(data['pexelsAPIKey'], i)
+        if not bgVideo or not os.path.exists(bgVideo):
+            print(f"Skipping video {i}: Failed to acquire background video.")
+            continue
         quote = getQuote()
+        if not quote:
+            print("No quotes available in quotes/motivational.txt. Exiting.")
+            break
         music = randomBgMusic()
         createVideo(quote, music, bgVideo, i, True)
         cleanUpAfterVideoFinished()
