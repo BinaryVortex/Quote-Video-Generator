@@ -1,3 +1,7 @@
+<div align="center">
+<img src="logo.png" alt="FUTURA Logo" width="1000"/>
+</div>
+
 # Short 'Quote' Video Generator
 
 Generate automated quote videos for short-form platforms (TikTok, YouTube Shorts, Instagram Reels). The script pulls vertical nature videos from Pexels, adds voiceover narration via Google Text-to-Speech (gTTS), renders animated text overlays with ImageMagick and MoviePy, and mixes in background music.
